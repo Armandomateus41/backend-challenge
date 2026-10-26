@@ -12,8 +12,10 @@ backend da Jungle Gaming.
 [![MikroORM](https://img.shields.io/badge/MikroORM-7-2F3E4E)](https://mikro-orm.io)
 [![AWS SQS](https://img.shields.io/badge/AWS%20SQS-FIFO%20via%20LocalStack%204.4-FF9900)](https://docs.localstack.cloud)
 [![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
+[![Keycloak](https://img.shields.io/badge/Auth-Keycloak%20OIDC-4D4D4D?logo=keycloak&logoColor=white)](#autenticação-opcional)
 
-[![Tests](https://img.shields.io/badge/tests-169%20passing-2E7D32)](#testes)
+[![CI](https://github.com/Armandomateus41/backend-challenge/actions/workflows/ci.yml/badge.svg)](https://github.com/Armandomateus41/backend-challenge/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-183%20passing-2E7D32)](#testes)
 [![Concurrency](https://img.shields.io/badge/concurrency-multi--process%20verified-2E7D32)](#cen%C3%A1rios-de-concorr%C3%AAncia)
 [![Mutation](https://img.shields.io/badge/mutation%20checks-10%20run-2E7D32)](#testes-de-muta%C3%A7%C3%A3o)
 [![ESLint](https://img.shields.io/badge/lint-ESLint-4B32C3?logo=eslint&logoColor=white)](eslint.config.js)
@@ -25,8 +27,9 @@ Processa `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK` de múltiplos provedores de
 saldo materializado e ledger auditável consistentes quando as mensagens chegam duplicadas, fora de
 ordem, em paralelo em várias instâncias ou quando um processo morre no meio do caminho.
 
-> Os indicadores de testes refletem a última execução local documentada em
-> [Resultado da última execução](#resultado-da-última-execução); o projeto não tem pipeline de CI.
+> O badge **CI** reflete o pipeline do GitHub Actions, que executa todas as suítes contra
+> PostgreSQL, LocalStack e Keycloak reais. Os demais indicadores de testes reproduzem a
+> [última execução local documentada](#resultado-da-última-execução).
 
 ## Sumário
 
@@ -75,6 +78,7 @@ duas instâncias `worker`. Para rodar os testes, veja [Testes](#testes).
   resultado original e conflito para payload divergente.
 - Invariantes também no schema: constraints, índices únicos parciais e triggers (ledger imutável,
   cadeia de saldos, wallet igual ao ledger no commit, estados terminais imutáveis).
+- Fila em memória por wallet em cada instância: uma wallet quente não esgota o pool de conexões.
 
 **Mensageria e falhas**
 
@@ -84,20 +88,26 @@ duas instâncias `worker`. Para rodar os testes, veja [Testes](#testes).
   por `eventId`.
 - Worker de `PENDING_REFERENCE` com backoff exponencial para `REFUND`/`ROLLBACK` entregues antes da
   aposta.
+- Retenção da inbox e da outbox publicada, sem nunca descartar eventos pendentes.
 
-**Observabilidade**
+**Segurança e operação**
 
+- Autenticação opcional de provedores via OIDC (Keycloak), com verificação de JWT por JWKS e
+  `403` quando um provedor tenta agir em nome de outro.
 - Logs JSON com `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`.
 - Métricas Prometheus para status, duplicatas, retries, DLQ, conflitos de lock, lag da outbox e
-  latência.
-- Health checks separados de liveness e readiness.
+  latência; health checks separados de liveness e readiness.
+- CI no GitHub Actions com as mesmas dependências do `docker-compose.yml`.
 
 ## Arquitetura em resumo
 
 ```mermaid
 flowchart LR
     provider[Provedores de jogos]
-    provider -->|HTTP + Idempotency-Key| api[API HTTP]
+    idp[Keycloak OIDC, opcional]
+    provider -.->|client credentials| idp
+    provider -->|HTTP + Bearer + Idempotency-Key| api[API HTTP]
+    api -.->|JWKS| idp
     provider -->|wager-transactions.fifo| consumer[Consumidor SQS]
     api --> usecase[ProcessWagerTransaction]
     consumer --> usecase
@@ -130,8 +140,9 @@ Os detalhes, as garantias e os trade-offs estão em [`ARCHITECTURE.md`](ARCHITEC
 
 - Bun 1.x (`npm install -g bun` ou o instalador oficial de bun.sh).
 - Docker com Docker Compose v2.
-- Portas livres no host: `55432` (PostgreSQL), `4566` (LocalStack) e `8080` (API). Podem ser
-  alteradas com `POSTGRES_HOST_PORT`, `LOCALSTACK_HOST_PORT` e `API_HOST_PORT`.
+- Portas livres no host: `55432` (PostgreSQL), `4566` (LocalStack), `8080` (API) e, com
+  autenticação, `8180` (Keycloak). Podem ser
+  alteradas com `POSTGRES_HOST_PORT`, `LOCALSTACK_HOST_PORT`, `API_HOST_PORT` e `KEYCLOAK_HOST_PORT`.
 
 ## Configuração
 
@@ -146,28 +157,34 @@ listando todas as variáveis inválidas. A lista completa, com os valores padrã
 <details>
 <summary>Variáveis principais</summary>
 
-| Variável                                                             | Padrão                                                       | Descrição                                                          |
-| -------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------ |
-| `DATABASE_URL`                                                       | obrigatória                                                  | URL do PostgreSQL                                                  |
-| `TEST_DATABASE_URL`                                                  | `postgres://wagering:wagering@localhost:55432/wagering_test` | banco usado pelos testes                                           |
-| `DATABASE_POOL_MAX`                                                  | `20`                                                         | conexões por instância                                             |
-| `DATABASE_LOCK_TIMEOUT_MS`                                           | `5000`                                                       | espera máxima por lock de linha antes de erro transitório          |
-| `HTTP_PORT`                                                          | `8080`                                                       | porta HTTP                                                         |
-| `INSTANCE_ID`                                                        | `hostname-pid`                                               | identificador da instância nos logs e no dono das leases           |
-| `SUPPORTED_CURRENCIES`                                               | `BRL`                                                        | moedas aceitas na criação de wallets (lista separada por vírgulas) |
-| `AWS_ENDPOINT_URL`                                                   | -                                                            | endpoint do LocalStack (`http://localhost:4566`)                   |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`                        | -                                                            | `test`/`test` no LocalStack (não são segredos)                     |
-| `SQS_WAGER_QUEUE_NAME`                                               | `wager-transactions.fifo`                                    | fila de entrada                                                    |
-| `SQS_WAGER_DLQ_NAME`                                                 | `wager-transactions-dlq.fifo`                                | DLQ                                                                |
-| `SQS_EVENTS_QUEUE_NAME`                                              | `wagering-events.fifo`                                       | destino dos eventos da outbox                                      |
-| `SQS_CONSUMER_ENABLED`                                               | `true`                                                       | liga o consumidor nesta instância                                  |
-| `SQS_MAX_ATTEMPTS`                                                   | `5`                                                          | recebimentos antes da DLQ para falhas transitórias                 |
-| `SQS_RETRY_BASE_DELAY_SECONDS` / `SQS_RETRY_MAX_DELAY_SECONDS`       | `2` / `300`                                                  | backoff via visibility timeout                                     |
-| `OUTBOX_PUBLISHER_ENABLED`                                           | `true`                                                       | liga o publisher da outbox                                         |
-| `OUTBOX_LEASE_MS`                                                    | `30000`                                                      | lease de um lote reivindicado                                      |
-| `PENDING_REFERENCE_WORKER_ENABLED`                                   | `true`                                                       | liga o worker de referências pendentes                             |
-| `PENDING_REFERENCE_MAX_ATTEMPTS`                                     | `8`                                                          | tentativas antes de `REFERENCE_NOT_FOUND`                          |
-| `PENDING_REFERENCE_BASE_DELAY_MS` / `PENDING_REFERENCE_MAX_DELAY_MS` | `1000` / `60000`                                             | backoff exponencial                                                |
+| Variável                                                             | Padrão                                                       | Descrição                                                                            |
+| -------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `DATABASE_URL`                                                       | obrigatória                                                  | URL do PostgreSQL                                                                    |
+| `TEST_DATABASE_URL`                                                  | `postgres://wagering:wagering@localhost:55432/wagering_test` | banco usado pelos testes                                                             |
+| `DATABASE_POOL_MAX`                                                  | `20`                                                         | conexões por instância                                                               |
+| `DATABASE_LOCK_TIMEOUT_MS`                                           | `5000`                                                       | espera máxima por lock de linha antes de erro transitório                            |
+| `HTTP_PORT`                                                          | `8080`                                                       | porta HTTP                                                                           |
+| `INSTANCE_ID`                                                        | `hostname-pid`                                               | identificador da instância nos logs e no dono das leases                             |
+| `SUPPORTED_CURRENCIES`                                               | `BRL`                                                        | moedas aceitas na criação de wallets (lista separada por vírgulas)                   |
+| `AWS_ENDPOINT_URL`                                                   | -                                                            | endpoint do LocalStack (`http://localhost:4566`)                                     |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`                        | -                                                            | `test`/`test` no LocalStack (não são segredos)                                       |
+| `SQS_WAGER_QUEUE_NAME`                                               | `wager-transactions.fifo`                                    | fila de entrada                                                                      |
+| `SQS_WAGER_DLQ_NAME`                                                 | `wager-transactions-dlq.fifo`                                | DLQ                                                                                  |
+| `SQS_EVENTS_QUEUE_NAME`                                              | `wagering-events.fifo`                                       | destino dos eventos da outbox                                                        |
+| `SQS_CONSUMER_ENABLED`                                               | `true`                                                       | liga o consumidor nesta instância                                                    |
+| `SQS_MAX_ATTEMPTS`                                                   | `5`                                                          | recebimentos antes da DLQ para falhas transitórias                                   |
+| `SQS_RETRY_BASE_DELAY_SECONDS` / `SQS_RETRY_MAX_DELAY_SECONDS`       | `2` / `300`                                                  | backoff via visibility timeout                                                       |
+| `OUTBOX_PUBLISHER_ENABLED`                                           | `true`                                                       | liga o publisher da outbox                                                           |
+| `OUTBOX_LEASE_MS`                                                    | `30000`                                                      | lease de um lote reivindicado                                                        |
+| `PENDING_REFERENCE_WORKER_ENABLED`                                   | `true`                                                       | liga o worker de referências pendentes                                               |
+| `PENDING_REFERENCE_MAX_ATTEMPTS`                                     | `8`                                                          | tentativas antes de `REFERENCE_NOT_FOUND`                                            |
+| `PENDING_REFERENCE_BASE_DELAY_MS` / `PENDING_REFERENCE_MAX_DELAY_MS` | `1000` / `60000`                                             | backoff exponencial                                                                  |
+| `WALLET_GATE_ENABLED`                                                | `true`                                                       | fila em memória por wallet antes de ocupar uma conexão                               |
+| `RETENTION_ENABLED` / `RETENTION_INTERVAL_MS`                        | `true` / `3600000`                                           | job de retenção e intervalo entre execuções                                          |
+| `INBOX_RETENTION_HOURS` / `OUTBOX_RETENTION_HOURS`                   | `336` / `168`                                                | idade mínima para remover inbox processada e outbox publicada                        |
+| `AUTH_ENABLED`                                                       | `false`                                                      | exige token JWT de provedor nas rotas não públicas                                   |
+| `AUTH_ISSUER` / `AUTH_JWKS_URL` / `AUTH_AUDIENCE`                    | -                                                            | emissor, JWKS e audiência esperados (obrigatórios os dois primeiros com auth ligada) |
+| `AUTH_PROVIDER_CLAIM`                                                | `provider_id`                                                | claim com o id do provedor                                                           |
 
 </details>
 
@@ -212,6 +229,30 @@ bun run migration:down          # reverte a última
 bun scripts/migrate.ts down all # reverte todas
 ```
 
+### Autenticação (opcional)
+
+Desligada por padrão. Para ligar, suba o Keycloak (realm `wagering`, um client por provedor) e
+recrie a API com `AUTH_ENABLED=true`:
+
+```bash
+docker compose --profile auth up -d --wait keycloak
+AUTH_ENABLED=true docker compose --profile auth up -d --wait api
+```
+
+Obter um token de provedor (fluxo `client_credentials`) e usá-lo:
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8180/realms/wagering/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=provider-a -d client_secret=provider-a-local-secret \
+  | sed 's/.*"access_token":"\([^"]*\)".*/\1/')
+curl -s -H "authorization: Bearer $TOKEN" localhost:8080/wallets/<walletId>
+```
+
+Sem token ou com token inválido a resposta é `401`; com o token de `provider-a` e `providerId`
+diferente no payload, `403 PROVIDER_MISMATCH`. Health e métricas continuam públicos. Os segredos do
+realm são credenciais de desenvolvimento local. Detalhes em
+[`ARCHITECTURE.md`](ARCHITECTURE.md#12-autenticação).
+
 ## API HTTP
 
 | Método | Rota                                                                  | Descrição                                   |
@@ -236,6 +277,8 @@ header `x-correlation-id` é aceito (ou gerado) e devolvido em todas as resposta
 | `200` / `201` | sucesso (`201` para transação `PROCESSED`, original ou replay)                                                |
 | `202`         | transação aceita em `PENDING_REFERENCE`, será liquidada pelo worker                                           |
 | `400`         | payload, header ou parâmetro inválido (`VALIDATION_ERROR`, `INVALID_AMOUNT`, `IDEMPOTENCY_KEY_REQUIRED`, ...) |
+| `401`         | token ausente, inválido ou expirado (somente com `AUTH_ENABLED=true`)                                         |
+| `403`         | `PROVIDER_MISMATCH`: o provedor autenticado difere do `providerId` do payload ou da rota                      |
 | `404`         | wallet ou transação inexistente                                                                               |
 | `409`         | conflito: `IDEMPOTENCY_KEY_CONFLICT`, `EXTERNAL_TRANSACTION_CONFLICT`, `WALLET_ALREADY_EXISTS`                |
 | `422`         | rejeição por regra de negócio, transação persistida como `REJECTED` com `failureCode`                         |
@@ -362,27 +405,41 @@ inicialização do contêiner e migrado pelos próprios testes. Cada arquivo cri
 
 ```bash
 bun run test:unit          # domínio, idempotência, eventos (sem infraestrutura)
-bun run test:integration   # schema, API HTTP, consumidor SQS, atomicidade e outbox
+bun run test:integration   # schema, API HTTP, consumidor SQS, atomicidade, outbox, retenção, auth com JWKS
 bun run test:concurrency   # paralelismo real e processos separados
-bun run test               # as três suítes
+bun run test               # unidade, integração e concorrência
 bun run typecheck
 bun run lint
 bun run format:check
 ```
 
+O teste de autenticação ponta a ponta usa um Keycloak real:
+
+```bash
+docker compose --profile auth up -d --wait keycloak
+bun run test:auth
+```
+
 `TEST_LOG_LEVEL=info` mostra os logs da aplicação durante os testes; `TEST_CHILD_LOGS=1` mostra os
 logs dos processos filhos dos testes multi-instância.
 
+### Integração contínua
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) executa formatação, lint, verificação de tipos
+e testes unitários num job, e noutro sobe PostgreSQL, LocalStack e Keycloak com o mesmo
+`docker-compose.yml`, aplica, reverte e reaplica as migrations e executa as suítes de integração,
+concorrência e autenticação.
+
 ### Resultado da última execução
 
-Executado em 26/10/2026 sobre banco recriado do zero, Windows 11, Docker Desktop 29.8 (12 CPUs),
-Bun 1.4.4. As suítes de integração e concorrência foram repetidas mais duas vezes sem falhas.
+Executado em 26/10/2026, Windows 11, Docker Desktop 29.8 (12 CPUs), Bun 1.4.4.
 
-| Suíte        | Testes | Resultado     |
-| ------------ | ------ | ------------- |
-| Unidade      | 105    | 105 aprovados |
-| Integração   | 55     | 55 aprovados  |
-| Concorrência | 9      | 9 aprovados   |
+| Suíte                     | Testes | Resultado     |
+| ------------------------- | ------ | ------------- |
+| Unidade                   | 108    | 108 aprovados |
+| Integração                | 65     | 65 aprovados  |
+| Concorrência              | 9      | 9 aprovados   |
+| Autenticação com Keycloak | 1      | 1 aprovado    |
 
 ### Cenários de concorrência
 
@@ -439,18 +496,24 @@ reconcilia todas as wallets e lê da `/metrics` os conflitos de lock e o lag da 
 **Ambiente:** uma instância `api` atendendo HTTP (pool de 20 conexões) e duas instâncias `worker`
 publicando a outbox, em Docker Desktop no mesmo host Windows (12 CPUs).
 
-| Perfil                                        | Throughput | p50    | p95    | p99   | Erros | Conflitos de lock | Wallets inconsistentes |
-| --------------------------------------------- | ---------- | ------ | ------ | ----- | ----- | ----------------- | ---------------------- |
-| 3000 req, 16 clientes, sem wallet quente      | 359 req/s  | 41 ms  | 65 ms  | 89 ms | 0     | 0                 | 0                      |
-| 3000 req, 50 clientes, sem wallet quente      | 195 req/s  | 142 ms | 249 ms | 5.8 s | 0     | 0                 | 0                      |
-| 5000 req, 50 clientes, 20% numa wallet quente | 138 req/s  | 161 ms | 759 ms | 6.5 s | 0     | 12                | 0                      |
+Valores medidos com a fila em memória por wallet ligada (padrão). Os perfis sem wallet quente foram
+executados mais de uma vez; os intervalos mostram a variação observada entre execuções.
 
-**Análise:** com mais clientes simultâneos do que conexões no pool, as requisições aguardam conexão
-e a cauda passa de segundos; o histograma interno confirma que o tempo é gasto antes e durante a
-transação, não na rede. Numa wallet quente, as operações são serializadas pelo lock e quem espera
-ocupa uma conexão, o que piora a cauda das demais wallets. Os 12 conflitos foram `lock_timeout`
-resolvidos com retry, sem erro para o cliente. O lag da outbox terminou em zero ou abaixo de 0,1 s.
-As mitigações estão em [`ARCHITECTURE.md`](ARCHITECTURE.md#15-trade-offs-e-limitações-conhecidas).
+| Perfil                                        | Throughput    | p50        | p95        | p99        | Erros | Conflitos de lock | Wallets inconsistentes |
+| --------------------------------------------- | ------------- | ---------- | ---------- | ---------- | ----- | ----------------- | ---------------------- |
+| 3000 req, 16 clientes, sem wallet quente      | 263–353 req/s | 42–53 ms   | 68–102 ms  | 95–145 ms  | 0     | 0                 | 0                      |
+| 3000 req, 50 clientes, sem wallet quente      | 236–350 req/s | 132–160 ms | 193–289 ms | 0,23–2,6 s | 0     | 0                 | 0                      |
+| 5000 req, 50 clientes, 20% numa wallet quente | 237 req/s     | 25 ms      | 861 ms     | 1,4 s      | 0     | 0                 | 0                      |
+
+Efeito da fila por wallet no perfil com wallet quente, comparado com a medição anterior sem ela:
+throughput de 138 para 237 req/s, p99 de 6,5 s para 1,4 s e conflitos de lock de 12 para 0.
+
+**Análise:** as operações de uma wallet quente continuam serializadas, mas a espera passou a ser em
+memória e não ocupa conexões, por isso as demais wallets deixaram de sofrer. Com mais clientes
+simultâneos do que conexões no pool (50 contra 20), as requisições ainda aguardam conexão e a cauda
+varia muito entre execuções; isso é dimensionamento de pool, não contenção de lock. O lag da outbox
+terminou em zero ou abaixo de 0,2 s em todos os perfis. As mitigações restantes estão em
+[`ARCHITECTURE.md`](ARCHITECTURE.md#15-trade-offs-e-limitações-conhecidas).
 
 ## Estrutura do projeto
 
@@ -458,13 +521,15 @@ As mitigações estão em [`ARCHITECTURE.md`](ARCHITECTURE.md#15-trade-offs-e-li
 src/
   domain/            Money, Wallet, WagerTransaction, ledger, regras de liquidação, eventos, inbox, outbox
   application/       casos de uso, portas, idempotência, classificação de erros
-  infrastructure/    MikroORM (unit of work, repositórios, migrations), SQS (consumidor, publisher), workers
-  interface/         controllers HTTP, contratos de entrada (zod), filtro de erros, auth
+  infrastructure/    MikroORM (unit of work, repositórios, migrations), SQS, autenticação JWT, workers
+  interface/         controllers HTTP, contratos de entrada (zod), filtro de erros, guard de autenticação
   observability/     logger, contexto de correlação, métricas
   config/            configuração validada
 scripts/             migrations, criação de filas, teste de carga
 test/                unit, integration, concurrency, fixtures e suporte
 docs/                enunciado original do desafio
+docker/              init do PostgreSQL e realm do Keycloak
+.github/workflows/   pipeline de CI
 ```
 
 ## Problemas conhecidos e soluções
@@ -472,7 +537,7 @@ docs/                enunciado original do desafio
 | Problema                                | Solução                                                                                                                                                                                           |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | LocalStack recente exige token de conta | a imagem está fixada em `localstack/localstack:4.4`, que funciona sem conta; não altere para `latest`                                                                                             |
-| Portas ocupadas                         | ajuste `POSTGRES_HOST_PORT`, `LOCALSTACK_HOST_PORT` ou `API_HOST_PORT` e as URLs no `.env`                                                                                                        |
+| Portas ocupadas                         | ajuste `POSTGRES_HOST_PORT`, `LOCALSTACK_HOST_PORT`, `API_HOST_PORT` ou `KEYCLOAK_HOST_PORT` e as URLs no `.env`                                                                                  |
 | Windows com `bun` instalado via npm     | o comando `bun` é um shim e matá-lo não mata o processo real; os testes lançam processos com `process.execPath`. Após uma interrupção forçada, verifique processos `bun.exe` órfãos               |
 | SIGTERM no Windows                      | o Windows não entrega SIGTERM a processos filhos; o encerramento controlado foi verificado em contêiner Linux (`docker compose stop worker`, saída 0) e por teste de integração via `app.close()` |
 | Banco de testes ausente                 | o `wagering_test` só é criado na primeira inicialização do volume; se o volume já existia, rode `docker compose exec postgres createdb -U wagering wagering_test`                                 |

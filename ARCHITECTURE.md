@@ -172,6 +172,13 @@ Defesas adicionais:
 
 Não existe lock global: duas wallets nunca disputam o mesmo lock.
 
+**Fila em memória por wallet (otimização).** Antes de abrir a transação, cada instância enfileira em
+memória as requisições da mesma wallet (`KeyedSerializer`), de modo que no máximo uma delas por
+instância ocupa uma conexão do pool enquanto espera o lock da linha. Isso não é um mecanismo de
+consistência: entre instâncias quem garante a exclusão continua sendo o `FOR UPDATE`. Pode ser
+desligado com `WALLET_GATE_ENABLED=false`; os testes de concorrência de processo único desligam-no
+para exercitar diretamente o lock do banco, e os testes multi-processo o mantêm ligado.
+
 ## 5. Idempotência
 
 - `Idempotency-Key` é obrigatório no HTTP; no SQS vem em `data.idempotencyKey`. A sugestão é
@@ -354,28 +361,40 @@ ordenar e descartar `WalletBalanceChanged` antigos.
 | `wagering_processing_duration_seconds{source,outcome}`            | latência de processamento                                   |
 | `wagering_reconciliation_mismatches_total`                        | reconciliações divergentes                                  |
 | `wagering_pending_reference_expired_total`                        | referências expiradas                                       |
+| `wagering_wallet_gate_queued_requests`                            | requisições aguardando na fila em memória por wallet        |
+| `wagering_retention_deleted_total{table}`                         | linhas removidas pelo job de retenção                       |
 
 - **Health**: `/health/live` não consulta dependências; `/health/ready` testa PostgreSQL (`SELECT 1`) e
   SQS (`GetQueueAttributes`) com timeout de 2 s e responde `503` se algum falhar.
 
 ## 12. Autenticação
 
-Decisão: não implementada neste desafio, conforme permitido. O ponto de extensão está no código:
-`ProviderAuthGuard` é um guard global que libera rotas marcadas com `@Public()` (health e métricas) e
-delega as demais a um `ProviderAuthenticator`; a implementação registrada é
-`AllowAllProviderAuthenticator`.
+Implementada com um Identity Provider externo, sem tabela própria de usuários nem senhas, e
+desligada por padrão (`AUTH_ENABLED=false`) para não interferir na avaliação das garantias
+financeiras.
 
-Desenho que eu adotaria:
+- **IdP local:** Keycloak 26 (`docker compose --profile auth`), realm `wagering` importado de
+  `docker/keycloak/wagering-realm.json`, com um client confidencial por provedor de jogos
+  (`provider-a`, `provider-b`) no fluxo OAuth2 `client_credentials`. Cada client tem um mapper que
+  grava o claim `provider_id` e outro que inclui a audiência `wagering-api`. Segredos e senha do admin
+  do realm são credenciais de desenvolvimento local.
+- **Validação:** `JwtProviderAuthenticator` verifica a assinatura com as chaves do endpoint JWKS do
+  IdP (cache e rotação feitos pela biblioteca `jose`), o `iss`, o `aud` e a expiração, e aceita apenas
+  RS256, PS256 e ES256. O IdP indisponível resulta em `503`, e não em `401`.
+- **Autorização:** o claim `provider_id` precisa ser igual ao `providerId` do payload
+  (`POST /wagering/transactions`) ou do path (`/providers/:providerId/...`); caso contrário a resposta
+  é `403 PROVIDER_MISMATCH` antes de qualquer processamento. A consulta por id interno de uma
+  transação de outro provedor responde `404`, para não revelar a sua existência. Wallets pertencem ao
+  jogador e não a um provedor, portanto qualquer provedor autenticado pode consultá-las.
+- **Rotas públicas:** `/health/live`, `/health/ready` e `/metrics` (`@Public()`).
+- **SQS:** canal interno confiável, autorizado por IAM na AWS. O `providerId` da mensagem continua
+  sujeito às regras de domínio (referências só resolvem dentro do mesmo provedor).
+- **Ponto de extensão:** `ProviderAuthGuard` delega a um `ProviderAuthenticator`; com a autenticação
+  desligada, a implementação registrada é `AllowAllProviderAuthenticator`.
 
-1. Keycloak (ou outro IdP OIDC) com um client confidencial por provedor de jogos, fluxo
-   `client_credentials`.
-2. Um `JwtProviderAuthenticator` valida assinatura pelo JWKS do IdP (com cache), `iss`, `aud` e `exp`,
-   e expõe o claim `provider_id` no request.
-3. O controller compara `provider_id` com o `providerId` do payload e responde `403` se divergirem.
-4. Mensagens SQS são canal interno confiável (autorização via IAM), mas o `providerId` da mensagem
-   continua sujeito às regras de domínio (referências só resolvem dentro do mesmo provider).
-
-Não há tabela própria de usuários nem senhas.
+Testes: `test/integration/auth.test.ts` usa chaves RSA reais e um endpoint JWKS HTTP local (token
+ausente, chave desconhecida, expirado, emissor e audiência errados, claim ausente, provedor
+divergente); `test/auth/keycloak.e2e.test.ts` (`bun run test:auth`) obtém tokens do Keycloak real.
 
 ## 13. ORM e estratégia transacional
 
@@ -405,29 +424,36 @@ Leituras que precisam de consistência entre tabelas (reconciliação) usam uma 
 - Integração (PostgreSQL e LocalStack reais): migrations reversíveis e cada constraint ou trigger;
   API HTTP completa; consumidor SQS com inbox, redelivery, DLQ, retry com lock real segurado por outra
   conexão e shutdown com trabalho pendente; atomicidade com falha injetada depois das escritas de
-  saldo e ledger; recuperação da outbox.
+  saldo e ledger; recuperação da outbox; retenção; autenticação com JWKS real.
 - Concorrência: paralelismo real dentro de um processo e entre processos separados, inclusive
   `SIGKILL` entre commit e ack e durante requisições em voo.
+- Autenticação ponta a ponta com Keycloak real (`bun run test:auth`).
 - Mutação: ver tabela no `README.md`.
+- CI: `.github/workflows/ci.yml` executa formatação, lint, tipos e as quatro suítes contra os mesmos
+  contêineres do `docker-compose.yml`, além de aplicar, reverter e reaplicar as migrations.
 
 ## 15. Trade-offs e limitações conhecidas
 
 - **Wallet quente.** O lock pessimista serializa a wallet; o throughput dela é limitado pelo tempo em
-  que o lock fica retido (algumas consultas por operação). Requisições à espera ocupam conexões do
-  pool, o que aumenta a latência das demais wallets na mesma instância (medido no teste de carga).
-  Mitigações possíveis: fila em memória por wallet para limitar quantas requisições de uma mesma
-  wallet disputam o pool, `lock_timeout` menor com retry no cliente, pool maior atrás de um
-  PgBouncer e controle de admissão (no máximo N requisições em voo por instância).
+  que o lock fica retido (algumas consultas por operação). Mitigação implementada: uma fila em
+  memória por wallet em cada instância (`WALLET_GATE_ENABLED`), para que as requisições à espera não
+  ocupem conexões do pool. No teste de carga com 20% do tráfego numa wallet, o p99 caiu de 6,5 s
+  para 1,4 s e os conflitos de lock de 12 para 0. Entre instâncias a disputa continua resolvida pelo
+  lock do banco.
+- **Pool de conexões.** Com mais requisições simultâneas do que conexões, as requisições esperam por
+  conexão e a cauda varia muito entre execuções (p99 de 0,2 s a 2,6 s com 50 clientes e pool de 20).
+  Em produção: dimensionar o pool, usar PgBouncer e limitar requisições em voo por instância.
 - **Ordem de eventos entre publishers.** Com vários publishers, dois eventos da mesma wallet podem ser
   publicados fora de ordem. Consumidores devem usar `walletVersion` e deduplicar por `eventId`.
 - **Janela de deduplicação da FIFO** é de 5 minutos; fora dela a deduplicação é responsabilidade do
   consumidor do evento.
-- **Retenção.** Não há limpeza de linhas antigas da inbox e da outbox publicada; em produção seria um
-  job de retenção por idade.
+- **Retenção.** O job remove linhas da inbox processadas há mais de `INBOX_RETENTION_HOURS` (padrão
+  14 dias, acima da retenção da fila e da DLQ) e mensagens da outbox publicadas há mais de
+  `OUTBOX_RETENTION_HOURS` (padrão 7 dias). Mensagens pendentes nunca são removidas. Um redelivery
+  posterior à retenção da inbox continua deduplicado pela chave de idempotência, que não expira.
 - **Moedas.** O modelo é multi-moeda e os conflitos de moeda são testados, mas apenas `BRL` está
   habilitado (`SUPPORTED_CURRENCIES`). A escala é fixa em 2 casas para todas as moedas.
 - **Reversão parcial** não é suportada (valor deve ser igual ao da referência).
 - **Wallet inexistente via SQS** vai para a DLQ em vez de ser persistida, porque não há wallet à qual
   vincular a transação.
 - **OpenTelemetry e dashboards** não foram implementados; a correlação é feita por logs e métricas.
-- **Autenticação** não implementada (seção 12).
