@@ -6,7 +6,8 @@ import { RequestValidationError } from './request-validation';
 
 /**
  * Status mapping shared by every endpoint:
- *   400 invalid payload | 404 unknown resource | 409 idempotency or uniqueness conflict
+ *   400 invalid payload | 401 missing or invalid token | 403 provider mismatch
+ *   404 unknown resource | 409 idempotency or uniqueness conflict
  *   503 transient infrastructure failure (safe to retry with the same Idempotency-Key)
  *   500 unexpected error.
  * Business rejections (422) and pending processing (202) are successful handlings and are
@@ -14,6 +15,8 @@ import { RequestValidationError } from './request-validation';
  */
 const STATUS_BY_CATEGORY: Record<ErrorCategory, number> = {
   validation: 400,
+  unauthenticated: 401,
+  forbidden: 403,
   not_found: 404,
   conflict: 409,
   transient: 503,
@@ -43,6 +46,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
     } else if (classified.category === 'transient') {
       logger().warn({ err: serializeError(exception) }, 'transient failure');
       response.setHeader('Retry-After', '1');
+    } else if (classified.category === 'unauthenticated') {
+      response.setHeader('WWW-Authenticate', 'Bearer');
     }
     response.status(status).json({
       error: {

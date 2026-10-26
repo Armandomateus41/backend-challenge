@@ -61,6 +61,11 @@ services:
       INSTANCE_ID: api
       HTTP_PORT: '8080'
       SQS_CONSUMER_ENABLED: 'false'
+      # Enable with AUTH_ENABLED=true and the 'auth' profile (Keycloak).
+      AUTH_ENABLED: ${AUTH_ENABLED:-false}
+      AUTH_ISSUER: http://localhost:${KEYCLOAK_HOST_PORT:-8180}/realms/wagering
+      AUTH_JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+      AUTH_AUDIENCE: wagering-api
     ports:
       - '${API_HOST_PORT:-8080}:8080'
     depends_on:
@@ -80,6 +85,31 @@ services:
       setup:
         condition: service_completed_successfully
     stop_grace_period: 30s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2.5
+    profiles: ['auth']
+    command: ['start-dev', '--import-realm']
+    environment:
+      # Local development credentials only.
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_HOST_PORT:-8180}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: 'true'
+      KC_HEALTH_ENABLED: 'true'
+    ports:
+      - '${KEYCLOAK_HOST_PORT:-8180}:8080'
+    volumes:
+      - ./docker/keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          "exec 3<>/dev/tcp/localhost/9000 && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && grep -q UP <&3",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 40
 
 volumes:
   postgres-data:

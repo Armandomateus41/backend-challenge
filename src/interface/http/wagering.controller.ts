@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Headers, Inject, Param, Post, Req, Res } from '@nestjs/common';
 import { type Request, type Response } from 'express';
 import { z } from 'zod';
+import { TransactionNotFoundError } from '../../application/errors';
 import { GetWagerTransaction } from '../../application/use-cases/get-wager-transaction';
 import { ProcessWagerTransaction } from '../../application/use-cases/process-wager-transaction';
 import { type WagerTransactionView } from '../../application/wager-transaction-result';
@@ -10,6 +11,7 @@ import {
   idempotencyKeySchema,
   wagerTransactionBodySchema,
 } from '../contracts/wager-transaction-request';
+import { assertProviderAccess, providerIdentityOf } from './auth';
 import { correlationIdOf } from './correlation';
 import { parseRequest, RequestValidationError } from './request-validation';
 
@@ -51,6 +53,7 @@ export class WageringController {
     }
     const key = parseRequest(idempotencyKeySchema, idempotencyKey, 'Idempotency-Key header');
     const fields = parseRequest(wagerTransactionBodySchema, body, 'transaction payload');
+    assertProviderAccess(request, fields.providerId);
     const outcome = await this.processWager.execute(
       { ...fields, idempotencyKey: key },
       { source: 'http', correlationId: correlationIdOf(request) },
@@ -62,17 +65,30 @@ export class WageringController {
   }
 
   @Get('wagering/transactions/:transactionId')
-  byId(@Param('transactionId') transactionId: string): Promise<WagerTransactionView> {
-    return this.getTransaction.byId(parseRequest(idSchema, transactionId, 'transactionId'));
+  async byId(
+    @Param('transactionId') transactionId: string,
+    @Req() request: Request,
+  ): Promise<WagerTransactionView> {
+    const id = parseRequest(idSchema, transactionId, 'transactionId');
+    const view = await this.getTransaction.byId(id);
+    // Another provider's transaction is reported as absent, not as forbidden.
+    const identity = providerIdentityOf(request);
+    if (identity && identity.providerId !== view.providerId) {
+      throw new TransactionNotFoundError(id);
+    }
+    return view;
   }
 
   @Get('providers/:providerId/wagering/transactions/:externalTransactionId')
   byExternalId(
     @Param('providerId') providerId: string,
     @Param('externalTransactionId') externalTransactionId: string,
+    @Req() request: Request,
   ): Promise<WagerTransactionView> {
+    const provider = parseRequest(pathSegment, providerId, 'providerId');
+    assertProviderAccess(request, provider);
     return this.getTransaction.byExternalId(
-      parseRequest(pathSegment, providerId, 'providerId'),
+      provider,
       parseRequest(pathSegment, externalTransactionId, 'externalTransactionId'),
     );
   }

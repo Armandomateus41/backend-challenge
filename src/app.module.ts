@@ -21,6 +21,7 @@ import {
   ReconcileWallet,
 } from './application/use-cases/wallets';
 import { APP_CONFIG, type AppConfig } from './config/app-config';
+import { JwtProviderAuthenticator } from './infrastructure/auth/jwt-provider-authenticator';
 import { BackgroundWorkers } from './infrastructure/background-workers';
 import { MikroOrmUnitOfWork } from './infrastructure/database/mikro-orm-unit-of-work';
 import { createOrm } from './infrastructure/database/orm';
@@ -176,7 +177,18 @@ export class AppModule {
             PurgeExpiredMessages,
           ],
         },
-        { provide: PROVIDER_AUTHENTICATOR, useClass: AllowAllProviderAuthenticator },
+        {
+          provide: PROVIDER_AUTHENTICATOR,
+          useFactory: () =>
+            config.auth.enabled && config.auth.issuer && config.auth.jwksUrl
+              ? new JwtProviderAuthenticator({
+                  issuer: config.auth.issuer,
+                  jwksUrl: config.auth.jwksUrl,
+                  audience: config.auth.audience,
+                  providerClaim: config.auth.providerClaim,
+                })
+              : new AllowAllProviderAuthenticator(),
+        },
         { provide: APP_GUARD, useClass: ProviderAuthGuard },
         { provide: APP_FILTER, useClass: HttpExceptionFilter },
         Lifecycle,

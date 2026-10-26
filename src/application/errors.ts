@@ -1,11 +1,14 @@
 /**
  * How an adapter must treat a failure:
  * - validation: malformed input, never retry unchanged;
+ * - unauthenticated / forbidden: missing or invalid credentials, or a provider acting on another
+ *   provider's data;
  * - not_found: referenced resource absent;
  * - conflict: request collides with persisted state (idempotency, uniqueness);
  * - transient: infrastructure hiccup, safe to retry with the same idempotency key.
  */
-export type ApplicationErrorKind = 'validation' | 'not_found' | 'conflict' | 'transient';
+export type ApplicationErrorKind =
+  'validation' | 'unauthenticated' | 'forbidden' | 'not_found' | 'conflict' | 'transient';
 
 export abstract class ApplicationError extends Error {
   abstract readonly code: string;
@@ -100,5 +103,24 @@ export class TransientInfrastructureError extends ApplicationError {
     options?: ErrorOptions,
   ) {
     super(message, options);
+  }
+}
+
+export class AuthenticationError extends ApplicationError {
+  readonly code = 'UNAUTHENTICATED';
+  readonly kind = 'unauthenticated';
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+  }
+}
+
+/** The authenticated provider tried to act on behalf of another provider. */
+export class ProviderMismatchError extends ApplicationError {
+  readonly code = 'PROVIDER_MISMATCH';
+  readonly kind = 'forbidden';
+
+  constructor(authenticated: string, requested: string) {
+    super(`Provider ${authenticated} cannot act on behalf of ${requested}`);
   }
 }

@@ -185,6 +185,8 @@ export class SqsWagerConsumer {
     const classified = classifyError(error);
     if (
       classified.category === 'validation' ||
+      classified.category === 'unauthenticated' ||
+      classified.category === 'forbidden' ||
       classified.category === 'not_found' ||
       classified.category === 'conflict'
     ) {
