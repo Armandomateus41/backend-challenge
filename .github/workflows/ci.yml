@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Format, lint, types and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run format:check
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun run test:unit
+
+  integration:
+    name: Integration, concurrency and auth tests (PostgreSQL, LocalStack, Keycloak)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DATABASE_URL: postgres://wagering:wagering@localhost:55432/wagering
+      TEST_DATABASE_URL: postgres://wagering:wagering@localhost:55432/wagering_test
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localhost:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Start PostgreSQL, LocalStack and Keycloak
+        run: docker compose --profile auth up -d --wait postgres localstack keycloak
+      - name: Migrations are reversible
+        run: |
+          bun run migration:up
+          bun scripts/migrate.ts down all
+          bun run migration:up
+      - run: bun run test:integration
+      - run: bun run test:concurrency
+      - run: bun run test:auth
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose --profile auth logs --no-color --tail 200
