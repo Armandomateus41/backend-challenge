@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { z } from 'zod';
 
 const booleanFlag = z
@@ -12,7 +13,7 @@ const envSchema = z.object({
   DATABASE_LOCK_TIMEOUT_MS: positiveInt.default(5000),
 
   HTTP_PORT: z.coerce.number().int().min(0).max(65535).default(8080),
-  INSTANCE_ID: z.string().min(1).default(`instance-${process.pid}`),
+  INSTANCE_ID: z.string().min(1).default(`${hostname()}-${process.pid}`),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   SUPPORTED_CURRENCIES: z
     .string()
