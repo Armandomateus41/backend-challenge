@@ -17,7 +17,12 @@ let api: ApiClient;
 beforeAll(async () => {
   db = await TestDatabase.connect();
   await db.reset();
-  const config = testConfig(uniqueSuffix(), { DATABASE_POOL_MAX: '40' });
+  // The in-memory wallet gate is off so that concurrent requests reach PostgreSQL together and
+  // the tests exercise the database row lock itself, not the per-process queue in front of it.
+  const config = testConfig(uniqueSuffix(), {
+    DATABASE_POOL_MAX: '40',
+    WALLET_GATE_ENABLED: 'false',
+  });
   queues = await TestQueues.create(config);
   running = await startApp(config);
   api = new ApiClient(running.baseUrl);

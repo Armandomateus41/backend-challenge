@@ -6,6 +6,7 @@ import { enrichContext } from '../../observability/context';
 import { logger } from '../../observability/logger';
 import { metrics } from '../../observability/metrics';
 import { newId } from '../../shared/ids';
+import { KeyedSerializer } from '../../shared/keyed-serializer';
 import {
   ExternalTransactionConflictError,
   IdempotencyConflictError,
@@ -48,9 +49,17 @@ const MAX_ATTEMPTS = 3;
  * the key is checked before and again after acquiring the lock.
  */
 export class ProcessWagerTransaction {
+  /**
+   * Requests for the same wallet wait in memory, one at a time per instance, instead of each
+   * holding a pooled connection while blocked on the row lock. Without it, a hot wallet can
+   * exhaust the pool and delay every other wallet served by the instance.
+   */
+  private readonly walletGate = new KeyedSerializer();
+
   constructor(
     private readonly uow: UnitOfWork,
     private readonly pendingReferenceBackoff: BackoffPolicy,
+    private readonly options: { serializePerWallet: boolean } = { serializePerWallet: true },
   ) {}
 
   async execute(
@@ -68,7 +77,9 @@ export class ProcessWagerTransaction {
     const startedAt = performance.now();
     let outcomeLabel = 'error';
     try {
-      const outcome = await this.executeWithRetry(normalized, context);
+      const outcome = await this.runForWallet(command.walletId, () =>
+        this.executeWithRetry(normalized, context),
+      );
       outcomeLabel = this.recordMetrics(outcome, normalized, context);
       return outcome;
     } catch (error) {
@@ -82,6 +93,19 @@ export class ProcessWagerTransaction {
         { source: context.source, outcome: outcomeLabel },
         (performance.now() - startedAt) / 1000,
       );
+    }
+  }
+
+  private async runForWallet<T>(walletId: string, task: () => Promise<T>): Promise<T> {
+    if (!this.options.serializePerWallet) {
+      return task();
+    }
+    const gated = this.walletGate.run(walletId, task);
+    metrics.walletGateQueued.set(this.walletGate.waiting);
+    try {
+      return await gated;
+    } finally {
+      metrics.walletGateQueued.set(this.walletGate.waiting);
     }
   }
 

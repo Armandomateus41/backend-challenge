@@ -89,10 +89,14 @@ export class AppModule {
         {
           provide: ProcessWagerTransaction,
           useFactory: (uow: UnitOfWork) =>
-            new ProcessWagerTransaction(uow, {
-              baseDelayMs: config.pendingReference.baseDelayMs,
-              maxDelayMs: config.pendingReference.maxDelayMs,
-            }),
+            new ProcessWagerTransaction(
+              uow,
+              {
+                baseDelayMs: config.pendingReference.baseDelayMs,
+                maxDelayMs: config.pendingReference.maxDelayMs,
+              },
+              { serializePerWallet: config.walletGateEnabled },
+            ),
           inject: [UNIT_OF_WORK],
         },
         {

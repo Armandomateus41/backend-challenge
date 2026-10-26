@@ -57,6 +57,11 @@ export const metrics = {
     labelNames: ['event_type'] as const,
     registers: [metricsRegistry],
   }),
+  walletGateQueued: new Gauge({
+    name: 'wagering_wallet_gate_queued_requests',
+    help: 'Requests waiting in memory behind another request for the same wallet',
+    registers: [metricsRegistry],
+  }),
   processingDuration: new Histogram({
     name: 'wagering_processing_duration_seconds',
     help: 'Latency of wager transaction processing, by entry point and outcome',

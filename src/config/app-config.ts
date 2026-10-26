@@ -21,6 +21,7 @@ const envSchema = z.object({
     .transform((value) => value.split(',').map((currency) => currency.trim().toUpperCase()))
     .pipe(z.array(z.string().regex(/^[A-Z]{3}$/)).min(1)),
   SHUTDOWN_TIMEOUT_MS: positiveInt.default(20000),
+  WALLET_GATE_ENABLED: booleanFlag.default(true),
 
   AWS_REGION: z.string().min(1).default('us-east-1'),
   AWS_ENDPOINT_URL: z.string().url().optional(),
@@ -61,6 +62,8 @@ export interface AppConfig {
   logLevel: z.infer<typeof envSchema>['LOG_LEVEL'];
   supportedCurrencies: readonly string[];
   shutdownTimeoutMs: number;
+  /** Serialize requests per wallet in memory before they take a pooled connection. */
+  walletGateEnabled: boolean;
   aws: {
     region: string;
     endpoint: string | undefined;
@@ -120,6 +123,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     logLevel: e.LOG_LEVEL,
     supportedCurrencies: e.SUPPORTED_CURRENCIES,
     shutdownTimeoutMs: e.SHUTDOWN_TIMEOUT_MS,
+    walletGateEnabled: e.WALLET_GATE_ENABLED,
     aws: {
       region: e.AWS_REGION,
       endpoint: e.AWS_ENDPOINT_URL,
