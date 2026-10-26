@@ -65,6 +65,8 @@ export function testEnv(
     PENDING_REFERENCE_BASE_DELAY_MS: '100',
     PENDING_REFERENCE_MAX_DELAY_MS: '400',
     PENDING_REFERENCE_LEASE_MS: '2000',
+    RETENTION_ENABLED: 'false',
+    WALLET_GATE_ENABLED: 'true',
     ...overrides,
   };
 }

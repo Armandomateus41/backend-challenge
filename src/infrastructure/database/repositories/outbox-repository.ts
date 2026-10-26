@@ -108,6 +108,24 @@ export class PgOutboxRepository implements OutboxRepository {
     return rows.length === 1;
   }
 
+  /** Only published rows are eligible: pending events are never discarded. */
+  async deletePublishedBefore(retentionHours: number, limit: number): Promise<number> {
+    const rows = await query<{ deleted: number }>(
+      this.em,
+      `WITH expired AS (
+         DELETE FROM outbox_messages
+          WHERE id IN (
+            SELECT id FROM outbox_messages
+             WHERE published_at IS NOT NULL
+               AND published_at < now() - (? * interval '1 hour')
+             LIMIT ?)
+         RETURNING 1)
+       SELECT COUNT(*)::int AS deleted FROM expired`,
+      [retentionHours, limit],
+    );
+    return rows[0]?.deleted ?? 0;
+  }
+
   async stats(): Promise<OutboxStats> {
     const rows = await query(
       this.em,

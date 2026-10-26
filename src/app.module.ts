@@ -12,6 +12,7 @@ import { type MikroORM } from '@mikro-orm/postgresql';
 import { UNIT_OF_WORK, type UnitOfWork } from './application/ports/persistence';
 import { GetWagerTransaction } from './application/use-cases/get-wager-transaction';
 import { ProcessWagerTransaction } from './application/use-cases/process-wager-transaction';
+import { PurgeExpiredMessages } from './application/use-cases/purge-expired-messages';
 import { ResolvePendingReferences } from './application/use-cases/resolve-pending-references';
 import {
   CreateWallet,
@@ -106,6 +107,16 @@ export class AppModule {
           inject: [UNIT_OF_WORK],
         },
         {
+          provide: PurgeExpiredMessages,
+          useFactory: (uow: UnitOfWork) =>
+            new PurgeExpiredMessages(uow, {
+              inboxRetentionHours: config.retention.inboxRetentionHours,
+              outboxRetentionHours: config.retention.outboxRetentionHours,
+              batchSize: config.retention.batchSize,
+            }),
+          inject: [UNIT_OF_WORK],
+        },
+        {
           provide: CreateWallet,
           useFactory: (uow: UnitOfWork) => new CreateWallet(uow, config.supportedCurrencies),
           inject: [UNIT_OF_WORK],
@@ -156,8 +167,14 @@ export class AppModule {
             consumer: SqsWagerConsumer,
             publisher: OutboxPublisher,
             pending: ResolvePendingReferences,
-          ) => new BackgroundWorkers(config, consumer, publisher, pending),
-          inject: [SqsWagerConsumer, OutboxPublisher, ResolvePendingReferences],
+            retention: PurgeExpiredMessages,
+          ) => new BackgroundWorkers(config, consumer, publisher, pending, retention),
+          inject: [
+            SqsWagerConsumer,
+            OutboxPublisher,
+            ResolvePendingReferences,
+            PurgeExpiredMessages,
+          ],
         },
         { provide: PROVIDER_AUTHENTICATOR, useClass: AllowAllProviderAuthenticator },
         { provide: APP_GUARD, useClass: ProviderAuthGuard },

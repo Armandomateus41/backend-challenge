@@ -57,6 +57,12 @@ export const metrics = {
     labelNames: ['event_type'] as const,
     registers: [metricsRegistry],
   }),
+  retentionDeleted: new Counter({
+    name: 'wagering_retention_deleted_total',
+    help: 'Rows removed by the retention job, by table',
+    labelNames: ['table'] as const,
+    registers: [metricsRegistry],
+  }),
   walletGateQueued: new Gauge({
     name: 'wagering_wallet_gate_queued_requests',
     help: 'Requests waiting in memory behind another request for the same wallet',

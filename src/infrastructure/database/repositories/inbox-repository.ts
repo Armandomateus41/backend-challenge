@@ -28,6 +28,22 @@ export class PgInboxRepository implements InboxRepository {
     return rows.length === 1;
   }
 
+  async deleteProcessedBefore(retentionHours: number, limit: number): Promise<number> {
+    const rows = await query<{ deleted: number }>(
+      this.em,
+      `WITH expired AS (
+         DELETE FROM inbox_messages
+          WHERE (consumer_name, message_id) IN (
+            SELECT consumer_name, message_id FROM inbox_messages
+             WHERE processed_at < now() - (? * interval '1 hour')
+             LIMIT ?)
+         RETURNING 1)
+       SELECT COUNT(*)::int AS deleted FROM expired`,
+      [retentionHours, limit],
+    );
+    return rows[0]?.deleted ?? 0;
+  }
+
   async linkTransaction(message: InboxMessage, transactionId: string): Promise<void> {
     await query(
       this.em,

@@ -1,3 +1,4 @@
+import { type PurgeExpiredMessages } from '../application/use-cases/purge-expired-messages';
 import { type ResolvePendingReferences } from '../application/use-cases/resolve-pending-references';
 import { type AppConfig } from '../config/app-config';
 import { logger, serializeError } from '../observability/logger';
@@ -6,9 +7,9 @@ import { type OutboxPublisher } from './messaging/outbox-publisher';
 import { type SqsWagerConsumer } from './messaging/sqs-wager-consumer';
 
 /**
- * Owns the background loops of one instance: SQS consumer, outbox publisher and the
- * PENDING_REFERENCE worker. Each loop is enabled independently through configuration, and all
- * of them are safe to run on any number of instances at the same time.
+ * Owns the background loops of one instance: SQS consumer, outbox publisher, the
+ * PENDING_REFERENCE worker and the retention job. Each loop is enabled independently through
+ * configuration, and all of them are safe to run on any number of instances at the same time.
  */
 export class BackgroundWorkers {
   private readonly loops: PollingLoop[] = [];
@@ -18,6 +19,7 @@ export class BackgroundWorkers {
     private readonly consumer: SqsWagerConsumer,
     private readonly outboxPublisher: OutboxPublisher,
     private readonly pendingReferences: ResolvePendingReferences,
+    private readonly retention: PurgeExpiredMessages,
   ) {}
 
   start(): void {
@@ -54,6 +56,19 @@ export class BackgroundWorkers {
         ),
       );
     }
+    if (this.config.retention.enabled) {
+      this.loops.push(
+        new PollingLoop(
+          'retention',
+          async () => {
+            await this.retention.runOnce();
+            return false;
+          },
+          this.config.retention.intervalMs,
+          onError,
+        ),
+      );
+    }
     this.loops.forEach((loop) => loop.start());
     if (this.config.sqs.consumerEnabled) {
       this.consumer.start();
@@ -63,6 +78,7 @@ export class BackgroundWorkers {
         sqsConsumer: this.config.sqs.consumerEnabled,
         outboxPublisher: this.config.outbox.enabled,
         pendingReferenceWorker: this.config.pendingReference.enabled,
+        retention: this.config.retention.enabled,
       },
       'background workers started',
     );

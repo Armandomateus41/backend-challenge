@@ -79,6 +79,8 @@ export interface InboxRepository {
   /** Inserts the inbox row; returns false when (consumerName, messageId) already exists. */
   tryRecord(message: InboxMessage): Promise<boolean>;
   linkTransaction(message: InboxMessage, transactionId: string): Promise<void>;
+  /** Deletes up to `limit` rows processed more than `retentionHours` ago; returns the count. */
+  deleteProcessedBefore(retentionHours: number, limit: number): Promise<number>;
 }
 
 export interface OutboxStats {
@@ -93,6 +95,8 @@ export interface OutboxRepository {
   /** Persists publish/retry state if `owner` still holds the lease; returns false otherwise. */
   saveDeliveryState(message: OutboxMessage, owner: string): Promise<boolean>;
   stats(): Promise<OutboxStats>;
+  /** Deletes up to `limit` messages published more than `retentionHours` ago; returns the count. */
+  deletePublishedBefore(retentionHours: number, limit: number): Promise<number>;
 }
 
 export interface RepositoryScope {

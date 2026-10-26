@@ -7,53 +7,76 @@ const booleanFlag = z
 
 const positiveInt = z.coerce.number().int().positive();
 
-const envSchema = z.object({
-  DATABASE_URL: z.string().url(),
-  DATABASE_POOL_MAX: positiveInt.default(20),
-  DATABASE_LOCK_TIMEOUT_MS: positiveInt.default(5000),
+const envSchema = z
+  .object({
+    DATABASE_URL: z.string().url(),
+    DATABASE_POOL_MAX: positiveInt.default(20),
+    DATABASE_LOCK_TIMEOUT_MS: positiveInt.default(5000),
 
-  HTTP_PORT: z.coerce.number().int().min(0).max(65535).default(8080),
-  INSTANCE_ID: z.string().min(1).default(`${hostname()}-${process.pid}`),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
-  SUPPORTED_CURRENCIES: z
-    .string()
-    .default('BRL')
-    .transform((value) => value.split(',').map((currency) => currency.trim().toUpperCase()))
-    .pipe(z.array(z.string().regex(/^[A-Z]{3}$/)).min(1)),
-  SHUTDOWN_TIMEOUT_MS: positiveInt.default(20000),
-  WALLET_GATE_ENABLED: booleanFlag.default(true),
+    HTTP_PORT: z.coerce.number().int().min(0).max(65535).default(8080),
+    INSTANCE_ID: z.string().min(1).default(`${hostname()}-${process.pid}`),
+    LOG_LEVEL: z
+      .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
+      .default('info'),
+    SUPPORTED_CURRENCIES: z
+      .string()
+      .default('BRL')
+      .transform((value) => value.split(',').map((currency) => currency.trim().toUpperCase()))
+      .pipe(z.array(z.string().regex(/^[A-Z]{3}$/)).min(1)),
+    SHUTDOWN_TIMEOUT_MS: positiveInt.default(20000),
+    WALLET_GATE_ENABLED: booleanFlag.default(true),
 
-  AWS_REGION: z.string().min(1).default('us-east-1'),
-  AWS_ENDPOINT_URL: z.string().url().optional(),
-  AWS_ACCESS_KEY_ID: z.string().optional(),
-  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+    AWS_REGION: z.string().min(1).default('us-east-1'),
+    AWS_ENDPOINT_URL: z.string().url().optional(),
+    AWS_ACCESS_KEY_ID: z.string().optional(),
+    AWS_SECRET_ACCESS_KEY: z.string().optional(),
 
-  SQS_WAGER_QUEUE_NAME: z.string().endsWith('.fifo').default('wager-transactions.fifo'),
-  SQS_WAGER_DLQ_NAME: z.string().endsWith('.fifo').default('wager-transactions-dlq.fifo'),
-  SQS_EVENTS_QUEUE_NAME: z.string().endsWith('.fifo').default('wagering-events.fifo'),
-  SQS_CONSUMER_ENABLED: booleanFlag.default(true),
-  SQS_CONSUMER_NAME: z.string().min(1).default('wager-transactions-consumer'),
-  SQS_MAX_ATTEMPTS: positiveInt.default(5),
-  SQS_WAIT_TIME_SECONDS: z.coerce.number().int().min(0).max(20).default(10),
-  SQS_VISIBILITY_TIMEOUT_SECONDS: positiveInt.default(30),
-  SQS_RETRY_BASE_DELAY_SECONDS: positiveInt.default(2),
-  SQS_RETRY_MAX_DELAY_SECONDS: positiveInt.max(43200).default(300),
+    SQS_WAGER_QUEUE_NAME: z.string().endsWith('.fifo').default('wager-transactions.fifo'),
+    SQS_WAGER_DLQ_NAME: z.string().endsWith('.fifo').default('wager-transactions-dlq.fifo'),
+    SQS_EVENTS_QUEUE_NAME: z.string().endsWith('.fifo').default('wagering-events.fifo'),
+    SQS_CONSUMER_ENABLED: booleanFlag.default(true),
+    SQS_CONSUMER_NAME: z.string().min(1).default('wager-transactions-consumer'),
+    SQS_MAX_ATTEMPTS: positiveInt.default(5),
+    SQS_WAIT_TIME_SECONDS: z.coerce.number().int().min(0).max(20).default(10),
+    SQS_VISIBILITY_TIMEOUT_SECONDS: positiveInt.default(30),
+    SQS_RETRY_BASE_DELAY_SECONDS: positiveInt.default(2),
+    SQS_RETRY_MAX_DELAY_SECONDS: positiveInt.max(43200).default(300),
 
-  OUTBOX_PUBLISHER_ENABLED: booleanFlag.default(true),
-  OUTBOX_POLL_INTERVAL_MS: positiveInt.default(500),
-  OUTBOX_BATCH_SIZE: positiveInt.max(10_000).default(50),
-  OUTBOX_LEASE_MS: positiveInt.default(30000),
-  OUTBOX_RETRY_BASE_DELAY_MS: positiveInt.default(1000),
-  OUTBOX_RETRY_MAX_DELAY_MS: positiveInt.default(60000),
+    OUTBOX_PUBLISHER_ENABLED: booleanFlag.default(true),
+    OUTBOX_POLL_INTERVAL_MS: positiveInt.default(500),
+    OUTBOX_BATCH_SIZE: positiveInt.max(10_000).default(50),
+    OUTBOX_LEASE_MS: positiveInt.default(30000),
+    OUTBOX_RETRY_BASE_DELAY_MS: positiveInt.default(1000),
+    OUTBOX_RETRY_MAX_DELAY_MS: positiveInt.default(60000),
 
-  PENDING_REFERENCE_WORKER_ENABLED: booleanFlag.default(true),
-  PENDING_REFERENCE_POLL_INTERVAL_MS: positiveInt.default(1000),
-  PENDING_REFERENCE_BATCH_SIZE: positiveInt.default(50),
-  PENDING_REFERENCE_MAX_ATTEMPTS: positiveInt.default(8),
-  PENDING_REFERENCE_BASE_DELAY_MS: positiveInt.default(1000),
-  PENDING_REFERENCE_MAX_DELAY_MS: positiveInt.default(60000),
-  PENDING_REFERENCE_LEASE_MS: positiveInt.default(30000),
-});
+    PENDING_REFERENCE_WORKER_ENABLED: booleanFlag.default(true),
+    PENDING_REFERENCE_POLL_INTERVAL_MS: positiveInt.default(1000),
+    PENDING_REFERENCE_BATCH_SIZE: positiveInt.default(50),
+    PENDING_REFERENCE_MAX_ATTEMPTS: positiveInt.default(8),
+    PENDING_REFERENCE_BASE_DELAY_MS: positiveInt.default(1000),
+    PENDING_REFERENCE_MAX_DELAY_MS: positiveInt.default(60000),
+    PENDING_REFERENCE_LEASE_MS: positiveInt.default(30000),
+
+    RETENTION_ENABLED: booleanFlag.default(true),
+    RETENTION_INTERVAL_MS: positiveInt.default(3_600_000),
+    RETENTION_BATCH_SIZE: positiveInt.max(10_000).default(1000),
+    INBOX_RETENTION_HOURS: positiveInt.default(336),
+    OUTBOX_RETENTION_HOURS: positiveInt.default(168),
+
+    AUTH_ENABLED: booleanFlag.default(false),
+    AUTH_ISSUER: z.string().url().optional(),
+    AUTH_JWKS_URL: z.string().url().optional(),
+    AUTH_AUDIENCE: z.string().min(1).optional(),
+    AUTH_PROVIDER_CLAIM: z.string().min(1).default('provider_id'),
+  })
+  .refine(
+    (env) =>
+      !env.AUTH_ENABLED || (env.AUTH_ISSUER !== undefined && env.AUTH_JWKS_URL !== undefined),
+    {
+      message: 'AUTH_ISSUER and AUTH_JWKS_URL are required when AUTH_ENABLED is true',
+      path: ['AUTH_ENABLED'],
+    },
+  );
 
 export interface AppConfig {
   database: { url: string; poolMax: number; lockTimeoutMs: number };
@@ -97,6 +120,20 @@ export interface AppConfig {
     baseDelayMs: number;
     maxDelayMs: number;
     leaseMs: number;
+  };
+  retention: {
+    enabled: boolean;
+    intervalMs: number;
+    batchSize: number;
+    inboxRetentionHours: number;
+    outboxRetentionHours: number;
+  };
+  auth: {
+    enabled: boolean;
+    issuer: string | undefined;
+    jwksUrl: string | undefined;
+    audience: string | undefined;
+    providerClaim: string;
   };
 }
 
@@ -160,6 +197,20 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       baseDelayMs: e.PENDING_REFERENCE_BASE_DELAY_MS,
       maxDelayMs: e.PENDING_REFERENCE_MAX_DELAY_MS,
       leaseMs: e.PENDING_REFERENCE_LEASE_MS,
+    },
+    retention: {
+      enabled: e.RETENTION_ENABLED,
+      intervalMs: e.RETENTION_INTERVAL_MS,
+      batchSize: e.RETENTION_BATCH_SIZE,
+      inboxRetentionHours: e.INBOX_RETENTION_HOURS,
+      outboxRetentionHours: e.OUTBOX_RETENTION_HOURS,
+    },
+    auth: {
+      enabled: e.AUTH_ENABLED,
+      issuer: e.AUTH_ISSUER,
+      jwksUrl: e.AUTH_JWKS_URL,
+      audience: e.AUTH_AUDIENCE,
+      providerClaim: e.AUTH_PROVIDER_CLAIM,
     },
   };
 }
