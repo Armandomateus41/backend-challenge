@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { metrics } from '../../src/observability/metrics';
 import { newId } from '../../src/shared/ids';
 import { ApiClient, type WalletBody } from '../support/api-client';
 import {
@@ -56,6 +57,14 @@ function betData(wallet: WalletBody, amount: string, extra: Record<string, unkno
   };
 }
 
+/** Inbox duplicates counted by this process (apps under test run in-process). */
+async function inboxDuplicates(): Promise<number> {
+  const { values } = await metrics.duplicates.get();
+  return values
+    .filter((value) => value.labels.type === 'inbox' && value.labels.source === 'sqs')
+    .reduce((sum, value) => sum + value.value, 0);
+}
+
 async function transactionCount(walletId: string): Promise<number> {
   const [row] = await db.query<{ count: number }>(
     `SELECT COUNT(*)::int AS count FROM wager_transactions WHERE wallet_id = ? AND kind <> 'OPENING'`,
@@ -95,6 +104,7 @@ describe('SQS consumer', () => {
     const wallet = await api.createWallet('100.00');
     const data = betData(wallet, '10.00');
     const messageId = `msg-${newId()}`;
+    const inboxDuplicatesBefore = await inboxDuplicates();
     // Same envelope messageId under distinct SQS deduplication ids: the broker delivers both.
     await queues.sendWager({ messageId, data }, { deduplicationId: newId() });
     await queues.sendWager({ messageId, data }, { deduplicationId: newId() });
@@ -122,6 +132,8 @@ describe('SQS consumer', () => {
       [messageId, otherMessageId],
     );
     expect(linked?.count).toBe(1);
+    // The second delivery of the same message id was stopped by the inbox, before any lock.
+    expect((await inboxDuplicates()) - inboxDuplicatesBefore).toBe(1);
     expect(await transactionCount(wallet.id)).toBe(1);
     expect(await db.walletState(wallet.id)).toMatchObject({
       balance: '90.00',
