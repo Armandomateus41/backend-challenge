@@ -1,35 +1,120 @@
+<div align="center">
+
 # Wagering Processor
 
-Serviço financeiro distribuído que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`,
-`ROLLBACK`) de múltiplos provedores de jogos, mantendo saldo materializado e ledger auditável
-consistentes sob duplicidade, entrega fora de ordem, concorrência entre instâncias e falhas de
-processo.
+Processador financeiro distribuído de transações de apostas, construído para o desafio técnico
+backend da Jungle Gaming.
 
-O enunciado original do desafio está em [`docs/CHALLENGE.md`](docs/CHALLENGE.md). As decisões de
-desenho, garantias e limitações estão em [`ARCHITECTURE.md`](ARCHITECTURE.md).
+[![Bun](https://img.shields.io/badge/Bun-1.4-000000?logo=bun&logoColor=white)](https://bun.sh)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9%20strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![NestJS](https://img.shields.io/badge/NestJS-12-E0234E?logo=nestjs&logoColor=white)](https://nestjs.com)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org)
+[![MikroORM](https://img.shields.io/badge/MikroORM-7-2F3E4E)](https://mikro-orm.io)
+[![AWS SQS](https://img.shields.io/badge/AWS%20SQS-FIFO%20via%20LocalStack%204.4-FF9900)](https://docs.localstack.cloud)
+[![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
 
-## Capacidades
+[![Tests](https://img.shields.io/badge/tests-169%20passing-2E7D32)](#testes)
+[![Concurrency](https://img.shields.io/badge/concurrency-multi--process%20verified-2E7D32)](#cen%C3%A1rios-de-concorr%C3%AAncia)
+[![Mutation](https://img.shields.io/badge/mutation%20checks-10%20run-2E7D32)](#testes-de-muta%C3%A7%C3%A3o)
+[![ESLint](https://img.shields.io/badge/lint-ESLint-4B32C3?logo=eslint&logoColor=white)](eslint.config.js)
+[![Prettier](https://img.shields.io/badge/code%20style-Prettier-F7B93E?logo=prettier&logoColor=black)](.prettierrc.json)
 
-- `Money` imutável com aritmética decimal exata (inteiro de centavos em `bigint`, `NUMERIC(20,2)` no
-  banco), serializado sempre como string com escala 2.
+</div>
+
+Processa `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK` de múltiplos provedores de jogos, mantendo
+saldo materializado e ledger auditável consistentes quando as mensagens chegam duplicadas, fora de
+ordem, em paralelo em várias instâncias ou quando um processo morre no meio do caminho.
+
+> Os indicadores de testes refletem a última execução local documentada em
+> [Resultado da última execução](#resultado-da-última-execução); o projeto não tem pipeline de CI.
+
+## Sumário
+
+- [Início rápido](#início-rápido)
+- [Destaques](#destaques)
+- [Arquitetura em resumo](#arquitetura-em-resumo)
+- [Stack](#stack)
+- [Pré-requisitos](#pré-requisitos)
+- [Configuração](#configuração)
+- [Execução](#execução)
+- [API HTTP](#api-http)
+- [Mensagens SQS e eventos](#mensagens-sqs-e-eventos)
+- [Testes](#testes)
+- [Teste de carga](#teste-de-carga)
+- [Estrutura do projeto](#estrutura-do-projeto)
+- [Problemas conhecidos e soluções](#problemas-conhecidos-e-soluções)
+- [Documentação relacionada](#documentação-relacionada)
+
+## Início rápido
+
+```bash
+cp .env.example .env
+docker compose up -d --build --wait
+curl -s localhost:8080/health/ready
+```
+
+Sobe PostgreSQL, LocalStack, aplica as migrations, cria as filas e inicia uma instância `api` e
+duas instâncias `worker`. Para rodar os testes, veja [Testes](#testes).
+
+## Destaques
+
+**Correção financeira**
+
+- `Money` imutável com aritmética exata: inteiro de centavos em `bigint`, `NUMERIC(20,2)` no banco,
+  serializado sempre como string com escala 2. Nenhum `number` toca em dinheiro.
 - Wallet com saldo nunca negativo, versão incrementada apenas quando o saldo muda e ledger
-  append-only com um lançamento por transação.
-- Idempotência persistente pelo header `Idempotency-Key`, com hash SHA-256 de JSON canônico do
-  payload de negócio, replay com o resultado original e conflito para payload divergente.
-- Lock pessimista por `walletId` (`SELECT ... FOR UPDATE`), correto com várias instâncias.
+  append-only com no máximo um lançamento por transação.
+- Reconciliação saldo x ledger sobre um snapshot consistente; divergências são sinalizadas, nunca
+  corrigidas em silêncio.
+
+**Concorrência e idempotência**
+
+- Lock pessimista por `walletId` (`SELECT ... FOR UPDATE`): correto com qualquer número de
+  instâncias, sem lock global.
+- Idempotência persistente pelo header `Idempotency-Key`, com SHA-256 de JSON canônico, replay com o
+  resultado original e conflito para payload divergente.
 - Invariantes também no schema: constraints, índices únicos parciais e triggers (ledger imutável,
-  cadeia de saldos, consistência wallet x ledger no commit, estados terminais imutáveis).
-- Consumidor SQS FIFO com inbox persistente, ack após commit, retry com backoff, DLQ e shutdown
-  controlado.
-- Transactional outbox com publishers concorrentes, lease com recuperação após queda e
-  deduplicação por `eventId`.
-- Worker de `PENDING_REFERENCE` com backoff exponencial para `REFUND`/`ROLLBACK` fora de ordem.
-- Reconciliação saldo x ledger, logs JSON com contexto de correlação, métricas Prometheus e health
-  checks separados.
+  cadeia de saldos, wallet igual ao ledger no commit, estados terminais imutáveis).
+
+**Mensageria e falhas**
+
+- Consumidor SQS FIFO com inbox persistente, ack somente após o commit, retry com backoff, DLQ e
+  shutdown controlado.
+- Transactional outbox com publishers concorrentes, leases recuperáveis após queda e deduplicação
+  por `eventId`.
+- Worker de `PENDING_REFERENCE` com backoff exponencial para `REFUND`/`ROLLBACK` entregues antes da
+  aposta.
+
+**Observabilidade**
+
+- Logs JSON com `correlationId`, `messageId`, `transactionId`, `walletId` e `providerId`.
+- Métricas Prometheus para status, duplicatas, retries, DLQ, conflitos de lock, lag da outbox e
+  latência.
+- Health checks separados de liveness e readiness.
+
+## Arquitetura em resumo
+
+```mermaid
+flowchart LR
+    provider[Provedores de jogos]
+    provider -->|HTTP + Idempotency-Key| api[API HTTP]
+    provider -->|wager-transactions.fifo| consumer[Consumidor SQS]
+    api --> usecase[ProcessWagerTransaction]
+    consumer --> usecase
+    usecase -->|uma transação SQL: wallet, transação,<br/>ledger, inbox e outbox| db[(PostgreSQL)]
+    consumer -.->|permanente ou tentativas esgotadas| dlq[wager-transactions-dlq.fifo]
+    db --> publisher[Outbox publisher]
+    publisher --> events[wagering-events.fifo]
+    db <--> pending[Worker PENDING_REFERENCE]
+```
+
+HTTP e SQS usam o mesmo caso de uso. A regra de negócio vive no domínio (`WagerSettlement`), a
+persistência acontece numa única transação SQL e os eventos só saem pela outbox depois do commit.
+Os detalhes, as garantias e os trade-offs estão em [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Stack
 
-| Item                                   | Versão                                                        |
+| Item                                   | Escolha                                                       |
 | -------------------------------------- | ------------------------------------------------------------- |
 | Runtime, package manager e test runner | Bun 1.4.4                                                     |
 | Linguagem                              | TypeScript 5.9 (`strict`, `noUncheckedIndexedAccess`)         |
@@ -55,7 +140,11 @@ cp .env.example .env
 ```
 
 O Bun carrega o `.env` automaticamente. A configuração é validada no arranque e o processo falha
-listando todas as variáveis inválidas. As principais:
+listando todas as variáveis inválidas. A lista completa, com os valores padrão, está em
+[`src/config/app-config.ts`](src/config/app-config.ts).
+
+<details>
+<summary>Variáveis principais</summary>
 
 | Variável                                                             | Padrão                                                       | Descrição                                                          |
 | -------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------ |
@@ -80,9 +169,9 @@ listando todas as variáveis inválidas. As principais:
 | `PENDING_REFERENCE_MAX_ATTEMPTS`                                     | `8`                                                          | tentativas antes de `REFERENCE_NOT_FOUND`                          |
 | `PENDING_REFERENCE_BASE_DELAY_MS` / `PENDING_REFERENCE_MAX_DELAY_MS` | `1000` / `60000`                                             | backoff exponencial                                                |
 
-A lista completa, com os valores padrão, está em [`src/config/app-config.ts`](src/config/app-config.ts).
+</details>
 
-## Instalação e execução
+## Execução
 
 ### Stack completa em Docker Compose
 
@@ -90,12 +179,17 @@ A lista completa, com os valores padrão, está em [`src/config/app-config.ts`](
 docker compose up -d --build --wait
 ```
 
-Sobe `postgres`, `localstack`, executa o serviço `setup` (migrations e criação das filas, idempotente)
-e inicia `api` (porta 8080, sem consumidor SQS) e `worker` com duas réplicas (consumidor SQS, outbox
-e worker de pendências). As três instâncias compartilham o mesmo banco e as mesmas filas.
+| Serviço      | Papel                                                                        |
+| ------------ | ---------------------------------------------------------------------------- |
+| `postgres`   | banco principal `wagering` e banco de testes `wagering_test`                 |
+| `localstack` | SQS FIFO                                                                     |
+| `setup`      | aplica migrations e cria as filas (idempotente, encerra com código 0)        |
+| `api`        | HTTP na porta 8080, sem consumidor SQS                                       |
+| `worker`     | duas réplicas com consumidor SQS, publisher da outbox e worker de pendências |
+
+As três instâncias compartilham o mesmo banco e as mesmas filas.
 
 ```bash
-curl -s localhost:8080/health/ready
 docker compose logs -f worker
 docker compose down -v
 ```
@@ -107,22 +201,164 @@ bun install
 bun run infra:up          # PostgreSQL e LocalStack
 bun run migration:up      # aplica as migrations
 bun run sqs:setup         # cria as filas FIFO e a DLQ
-bun run start             # inicia API, consumidor, outbox e worker
+bun run start             # API, consumidor, outbox e worker de pendências
 ```
 
-Migrations:
+### Migrations
 
 ```bash
 bun run migration:status
-bun run migration:down        # reverte a última
-bun scripts/migrate.ts down all
+bun run migration:down          # reverte a última
+bun scripts/migrate.ts down all # reverte todas
 ```
+
+## API HTTP
+
+| Método | Rota                                                                  | Descrição                                   |
+| ------ | --------------------------------------------------------------------- | ------------------------------------------- |
+| `POST` | `/wallets`                                                            | cria wallet, com crédito `OPENING` opcional |
+| `GET`  | `/wallets/:walletId`                                                  | saldo e versão                              |
+| `GET`  | `/wallets/:walletId/ledger?cursor=&limit=`                            | ledger paginado por cursor opaco            |
+| `POST` | `/wallets/:walletId/reconciliation`                                   | compara saldo materializado e ledger        |
+| `POST` | `/wagering/transactions`                                              | submete operação (exige `Idempotency-Key`)  |
+| `GET`  | `/wagering/transactions/:transactionId`                               | consulta por id interno                     |
+| `GET`  | `/providers/:providerId/wagering/transactions/:externalTransactionId` | consulta por id do provedor                 |
+| `GET`  | `/health/live`, `/health/ready`                                       | liveness e readiness, sem autenticação      |
+| `GET`  | `/metrics`                                                            | métricas Prometheus, sem autenticação       |
+
+### Códigos de status
+
+Todas as respostas são JSON. Os erros seguem `{ "error": { "code", "message", "details?" } }` e o
+header `x-correlation-id` é aceito (ou gerado) e devolvido em todas as respostas.
+
+| Status        | Significado                                                                                                   |
+| ------------- | ------------------------------------------------------------------------------------------------------------- |
+| `200` / `201` | sucesso (`201` para transação `PROCESSED`, original ou replay)                                                |
+| `202`         | transação aceita em `PENDING_REFERENCE`, será liquidada pelo worker                                           |
+| `400`         | payload, header ou parâmetro inválido (`VALIDATION_ERROR`, `INVALID_AMOUNT`, `IDEMPOTENCY_KEY_REQUIRED`, ...) |
+| `404`         | wallet ou transação inexistente                                                                               |
+| `409`         | conflito: `IDEMPOTENCY_KEY_CONFLICT`, `EXTERNAL_TRANSACTION_CONFLICT`, `WALLET_ALREADY_EXISTS`                |
+| `422`         | rejeição por regra de negócio, transação persistida como `REJECTED` com `failureCode`                         |
+| `503`         | falha transitória de infraestrutura, com `Retry-After`; reenviar com a mesma `Idempotency-Key` é seguro       |
+
+A taxonomia completa de `failureCode` está em [`ARCHITECTURE.md`](ARCHITECTURE.md#códigos-de-falha-failurecode).
+
+### Criar wallet
+
+```bash
+curl -s -X POST localhost:8080/wallets -H 'content-type: application/json' \
+  -d '{"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","initialBalance":{"amount":"1000.00","currency":"BRL"}}'
+```
+
+```json
+{
+  "id": "01a1780b-2ba7-746b-939a-55a924b30fa3",
+  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+  "balance": { "amount": "1000.00", "currency": "BRL" },
+  "version": 1,
+  "createdAt": "2026-10-26T11:49:20.423Z",
+  "updatedAt": "2026-10-26T11:49:20.423Z"
+}
+```
+
+Saldo inicial positivo gera a transação interna `OPENING` e o lançamento `CREDIT` na mesma transação
+SQL. Uma segunda wallet para o mesmo `playerId` e moeda retorna `409 WALLET_ALREADY_EXISTS`.
+
+### Submeter transação
+
+```bash
+curl -s -X POST localhost:8080/wagering/transactions \
+  -H 'content-type: application/json' \
+  -H 'Idempotency-Key: provider-a:transaction-123' \
+  -d '{"providerId":"provider-a","externalTransactionId":"transaction-123","playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"01a1780b-2ba7-746b-939a-55a924b30fa3","roundId":"round-987","gameId":"fortune-chimp","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}'
+```
+
+Resposta `201` (identificadores ilustrativos):
+
+```json
+{
+  "transactionId": "01a1780c-0f6e-7b51-9b4f-1c8e5d7f2a10",
+  "status": "PROCESSED",
+  "balance": { "amount": "975.00", "currency": "BRL" },
+  "idempotentReplay": false
+}
+```
+
+- Reenvio idêntico: mesmo corpo e status, com `"idempotentReplay": true` e o saldo observado no
+  processamento original.
+- Mesma chave com payload diferente: `409 IDEMPOTENCY_KEY_CONFLICT`.
+- `REFUND` e `ROLLBACK` exigem `referenceExternalTransactionId`; `WIN` e `LOSS` podem informá-lo.
+
+Rejeição de negócio, resposta `422`:
+
+```json
+{
+  "transactionId": "01a177ed-18c1-73db-aa80-da91f222eda4",
+  "status": "REJECTED",
+  "failureCode": "INSUFFICIENT_FUNDS",
+  "balance": { "amount": "20.00", "currency": "BRL" },
+  "idempotentReplay": false
+}
+```
+
+### Consultas, reconciliação e saúde
+
+```bash
+curl -s localhost:8080/wallets/<walletId>
+curl -s "localhost:8080/wallets/<walletId>/ledger?limit=50"
+curl -s "localhost:8080/wallets/<walletId>/ledger?limit=50&cursor=<nextCursor>"
+curl -s localhost:8080/wagering/transactions/<transactionId>
+curl -s localhost:8080/providers/provider-a/wagering/transactions/transaction-123
+curl -s -X POST localhost:8080/wallets/<walletId>/reconciliation
+curl -s localhost:8080/health/live    # processo vivo, não consulta dependências
+curl -s localhost:8080/health/ready   # 200 se PostgreSQL e SQS respondem, 503 caso contrário
+curl -s localhost:8080/metrics        # formato Prometheus
+```
+
+- O ledger é ordenado pela versão da wallet; `nextCursor` é opaco e `null` na última página.
+- A reconciliação devolve `storedBalance`, `calculatedBalance`, `difference`, `consistent` e
+  `checkedEntries`. Divergências são logadas e contadas em `wagering_reconciliation_mismatches_total`.
+
+## Mensagens SQS e eventos
+
+Entrada em `wager-transactions.fifo`, com `MessageGroupId` igual ao `walletId`:
+
+```json
+{
+  "messageId": "msg-123",
+  "type": "WagerTransactionRequested",
+  "occurredAt": "2026-07-29T15:00:00.000Z",
+  "data": {
+    "providerId": "provider-a",
+    "externalTransactionId": "transaction-123",
+    "idempotencyKey": "provider-a:transaction-123",
+    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+    "roundId": "round-987",
+    "gameId": "fortune-chimp",
+    "kind": "BET",
+    "money": { "amount": "25.00", "currency": "BRL" }
+  }
+}
+```
+
+| Situação                                                         | Tratamento                                     |
+| ---------------------------------------------------------------- | ---------------------------------------------- |
+| Processada, replay ou redelivery                                 | ack após o commit                              |
+| Rejeição de negócio                                              | `REJECTED` persistida e ack                    |
+| JSON ou schema inválido, `OPENING`, wallet inexistente, conflito | DLQ com motivo                                 |
+| Falha transitória                                                | retry com backoff; DLQ após `SQS_MAX_ATTEMPTS` |
+
+Os eventos `WagerTransactionProcessed`, `WagerTransactionRejected`, `WalletBalanceChanged` e
+`WagerTransactionPendingReference` são publicados em `wagering-events.fifo`, com `MessageGroupId`
+igual ao `walletId` e `MessageDeduplicationId` igual ao `eventId`.
 
 ## Testes
 
-Os testes de integração e concorrência usam PostgreSQL e LocalStack reais. Suba a infraestrutura
-antes (`bun run infra:up`); o banco `wagering_test` é criado pelo script de inicialização do
-contêiner e migrado pelos próprios testes. Cada arquivo cria filas SQS com nomes únicos.
+Os testes de integração e concorrência usam PostgreSQL e LocalStack reais, sem mocks. Suba a
+infraestrutura antes (`bun run infra:up`); o banco `wagering_test` é criado pelo script de
+inicialização do contêiner e migrado pelos próprios testes. Cada arquivo cria filas SQS com nomes
+únicos.
 
 ```bash
 bun run test:unit          # domínio, idempotência, eventos (sem infraestrutura)
@@ -139,7 +375,8 @@ logs dos processos filhos dos testes multi-instância.
 
 ### Resultado da última execução
 
-Executado em 26/10/2026, Windows 11, Docker Desktop 29.8 (12 CPUs), Bun 1.4.4:
+Executado em 26/10/2026 sobre banco recriado do zero, Windows 11, Docker Desktop 29.8 (12 CPUs),
+Bun 1.4.4. As suítes de integração e concorrência foram repetidas mais duas vezes sem falhas.
 
 | Suíte        | Testes | Resultado     |
 | ------------ | ------ | ------------- |
@@ -173,7 +410,7 @@ bun test --timeout 120000 test/concurrency -t "50 times"
 ### Testes de mutação
 
 Para confirmar que os testes centrais detectam defeitos reais, cada mutação abaixo foi aplicada ao
-código, os testes indicados foram executados e o código foi restaurado:
+código, os testes indicados foram executados e o código foi restaurado.
 
 | Mutação                                                            | Resultado                                                                                                                  |
 | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
@@ -188,7 +425,7 @@ código, os testes indicados foram executados e o código foi restaurado:
 | Desligar a deduplicação da inbox                                   | o teste de redelivery falha                                                                                                |
 | Fazer ack antes do processamento                                   | o teste de morte entre commit e ack falha                                                                                  |
 
-### Teste de carga
+## Teste de carga
 
 ```bash
 docker compose up -d --build --wait
@@ -199,8 +436,8 @@ Variáveis: `LOAD_BASE_URL`, `LOAD_REQUESTS`, `LOAD_CONCURRENCY`, `LOAD_WALLETS`
 O script cria as wallets, dispara `BET`/`WIN` com chaves únicas, reenvia 5% para medir replays,
 reconcilia todas as wallets e lê da `/metrics` os conflitos de lock e o lag da outbox.
 
-Metodologia: uma instância `api` atendendo HTTP (pool de 20 conexões), duas instâncias `worker`
-publicando a outbox, tudo em Docker Desktop no mesmo host Windows (12 CPUs). Valores medidos:
+**Ambiente:** uma instância `api` atendendo HTTP (pool de 20 conexões) e duas instâncias `worker`
+publicando a outbox, em Docker Desktop no mesmo host Windows (12 CPUs).
 
 | Perfil                                        | Throughput | p50    | p95    | p99   | Erros | Conflitos de lock | Wallets inconsistentes |
 | --------------------------------------------- | ---------- | ------ | ------ | ----- | ----- | ----------------- | ---------------------- |
@@ -208,138 +445,14 @@ publicando a outbox, tudo em Docker Desktop no mesmo host Windows (12 CPUs). Val
 | 3000 req, 50 clientes, sem wallet quente      | 195 req/s  | 142 ms | 249 ms | 5.8 s | 0     | 0                 | 0                      |
 | 5000 req, 50 clientes, 20% numa wallet quente | 138 req/s  | 161 ms | 759 ms | 6.5 s | 0     | 12                | 0                      |
 
-Leitura honesta: com mais clientes simultâneos do que conexões no pool, as requisições aguardam
-conexão e a cauda passa de segundos (o histograma interno confirma que o tempo é gasto antes e
-durante a transação, não na rede). Numa wallet quente, as operações são serializadas pelo lock e
-quem espera ocupa uma conexão, o que piora a cauda das demais wallets; os 12 conflitos foram
-`lock_timeout` resolvidos com retry, sem erro para o cliente. O lag da outbox terminou em zero ou
-abaixo de 0,1 s. Ver as mitigações em `ARCHITECTURE.md`.
+**Análise:** com mais clientes simultâneos do que conexões no pool, as requisições aguardam conexão
+e a cauda passa de segundos; o histograma interno confirma que o tempo é gasto antes e durante a
+transação, não na rede. Numa wallet quente, as operações são serializadas pelo lock e quem espera
+ocupa uma conexão, o que piora a cauda das demais wallets. Os 12 conflitos foram `lock_timeout`
+resolvidos com retry, sem erro para o cliente. O lag da outbox terminou em zero ou abaixo de 0,1 s.
+As mitigações estão em [`ARCHITECTURE.md`](ARCHITECTURE.md#15-trade-offs-e-limitações-conhecidas).
 
-## API HTTP
-
-Todas as respostas são JSON. Os erros seguem `{ "error": { "code", "message", "details?" } }`.
-O header `x-correlation-id` é aceito (ou gerado) e devolvido em todas as respostas.
-
-| Status        | Significado                                                                                                   |
-| ------------- | ------------------------------------------------------------------------------------------------------------- |
-| `200` / `201` | sucesso (`201` para transação `PROCESSED`, original ou replay)                                                |
-| `202`         | transação aceita em `PENDING_REFERENCE`, será liquidada pelo worker                                           |
-| `400`         | payload, header ou parâmetro inválido (`VALIDATION_ERROR`, `INVALID_AMOUNT`, `IDEMPOTENCY_KEY_REQUIRED`, ...) |
-| `404`         | wallet ou transação inexistente                                                                               |
-| `409`         | conflito: `IDEMPOTENCY_KEY_CONFLICT`, `EXTERNAL_TRANSACTION_CONFLICT`, `WALLET_ALREADY_EXISTS`                |
-| `422`         | rejeição por regra de negócio, transação persistida como `REJECTED` com `failureCode`                         |
-| `503`         | falha transitória de infraestrutura, com `Retry-After`; reenviar com a mesma `Idempotency-Key` é seguro       |
-
-### Criar wallet
-
-```bash
-curl -s -X POST localhost:8080/wallets -H 'content-type: application/json' \
-  -d '{"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","initialBalance":{"amount":"1000.00","currency":"BRL"}}'
-```
-
-```json
-{
-  "id": "01a1780b-2ba7-746b-939a-55a924b30fa3",
-  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
-  "balance": { "amount": "1000.00", "currency": "BRL" },
-  "version": 1,
-  "createdAt": "2026-10-26T11:49:20.423Z",
-  "updatedAt": "2026-10-26T11:49:20.423Z"
-}
-```
-
-Saldo inicial positivo gera a transação interna `OPENING` e o lançamento `CREDIT` na mesma transação
-SQL. Uma segunda wallet para o mesmo `playerId` e moeda retorna `409 WALLET_ALREADY_EXISTS`.
-
-### Submeter transação
-
-```bash
-curl -s -X POST localhost:8080/wagering/transactions \
-  -H 'content-type: application/json' \
-  -H 'Idempotency-Key: provider-a:transaction-123' \
-  -d '{"providerId":"provider-a","externalTransactionId":"transaction-123","playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"01a1780b-2ba7-746b-939a-55a924b30fa3","roundId":"round-987","gameId":"fortune-chimp","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}'
-```
-
-```json
-{
-  "transactionId": "01a1780c-0f6e-7b51-9b4f-1c8e5d7f2a10",
-  "status": "PROCESSED",
-  "balance": { "amount": "975.00", "currency": "BRL" },
-  "idempotentReplay": false
-}
-```
-
-- Reenvio idêntico: mesmo corpo e status, com `"idempotentReplay": true` e o saldo observado no
-  processamento original.
-- Mesma chave com payload diferente: `409 IDEMPOTENCY_KEY_CONFLICT`.
-- `REFUND` e `ROLLBACK` exigem `referenceExternalTransactionId`; `WIN` e `LOSS` podem informá-lo.
-- Rejeição de negócio (`422`):
-
-```json
-{
-  "transactionId": "01a177ed-18c1-73db-aa80-da91f222eda4",
-  "status": "REJECTED",
-  "failureCode": "INSUFFICIENT_FUNDS",
-  "balance": { "amount": "20.00", "currency": "BRL" },
-  "idempotentReplay": false
-}
-```
-
-Os `failureCode` possíveis estão documentados em `ARCHITECTURE.md`.
-
-### Consultas e reconciliação
-
-```bash
-curl -s localhost:8080/wallets/<walletId>
-curl -s "localhost:8080/wallets/<walletId>/ledger?limit=50"
-curl -s "localhost:8080/wallets/<walletId>/ledger?limit=50&cursor=<nextCursor>"
-curl -s localhost:8080/wagering/transactions/<transactionId>
-curl -s localhost:8080/providers/provider-a/wagering/transactions/transaction-123
-curl -s -X POST localhost:8080/wallets/<walletId>/reconciliation
-```
-
-O ledger é ordenado pela versão da wallet; `nextCursor` é opaco e `null` na última página.
-A reconciliação devolve `storedBalance`, `calculatedBalance`, `difference`, `consistent` e
-`checkedEntries`. Divergências não são corrigidas: são logadas e contadas na métrica
-`wagering_reconciliation_mismatches_total`.
-
-### Health e métricas
-
-```bash
-curl -s localhost:8080/health/live    # processo vivo, não consulta dependências
-curl -s localhost:8080/health/ready   # 200 se PostgreSQL e SQS respondem, 503 caso contrário
-curl -s localhost:8080/metrics        # formato Prometheus
-```
-
-Os endpoints de health e métricas não exigem autenticação.
-
-## Mensagens SQS
-
-Fila `wager-transactions.fifo`, `MessageGroupId` igual ao `walletId`:
-
-```json
-{
-  "messageId": "msg-123",
-  "type": "WagerTransactionRequested",
-  "occurredAt": "2026-07-29T15:00:00.000Z",
-  "data": {
-    "providerId": "provider-a",
-    "externalTransactionId": "transaction-123",
-    "idempotencyKey": "provider-a:transaction-123",
-    "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
-    "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
-    "roundId": "round-987",
-    "gameId": "fortune-chimp",
-    "kind": "BET",
-    "money": { "amount": "25.00", "currency": "BRL" }
-  }
-}
-```
-
-Os eventos de integração são publicados em `wagering-events.fifo`, com `MessageGroupId` igual ao
-`walletId` e `MessageDeduplicationId` igual ao `eventId`.
-
-## Estrutura
+## Estrutura do projeto
 
 ```
 src/
@@ -351,19 +464,21 @@ src/
   config/            configuração validada
 scripts/             migrations, criação de filas, teste de carga
 test/                unit, integration, concurrency, fixtures e suporte
+docs/                enunciado original do desafio
 ```
 
 ## Problemas conhecidos e soluções
 
-- **LocalStack exige token a partir de certas versões.** A imagem está fixada em
-  `localstack/localstack:4.4`, que funciona sem conta. Não altere para `latest`.
-- **Portas ocupadas.** Ajuste `POSTGRES_HOST_PORT`, `LOCALSTACK_HOST_PORT` ou `API_HOST_PORT` e as URLs
-  no `.env`.
-- **Windows e `bun` instalado via npm.** O comando `bun` é um shim; matar o shim não mata o processo
-  real. Os testes lançam processos com `process.execPath` por isso. Se um teste for interrompido à
-  força, verifique processos `bun.exe` órfãos antes de repetir a suíte.
-- **SIGTERM no Windows.** O Windows não entrega SIGTERM a processos filhos; o encerramento controlado
-  foi verificado em contêiner Linux (`docker compose stop worker`, saída 0 com consumidor e workers
-  parados) e por teste de integração via `app.close()`.
-- **Banco de testes ausente.** O `wagering_test` só é criado na primeira inicialização do volume. Se o
-  volume já existia, crie-o: `docker compose exec postgres createdb -U wagering wagering_test`.
+| Problema                                | Solução                                                                                                                                                                                           |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| LocalStack recente exige token de conta | a imagem está fixada em `localstack/localstack:4.4`, que funciona sem conta; não altere para `latest`                                                                                             |
+| Portas ocupadas                         | ajuste `POSTGRES_HOST_PORT`, `LOCALSTACK_HOST_PORT` ou `API_HOST_PORT` e as URLs no `.env`                                                                                                        |
+| Windows com `bun` instalado via npm     | o comando `bun` é um shim e matá-lo não mata o processo real; os testes lançam processos com `process.execPath`. Após uma interrupção forçada, verifique processos `bun.exe` órfãos               |
+| SIGTERM no Windows                      | o Windows não entrega SIGTERM a processos filhos; o encerramento controlado foi verificado em contêiner Linux (`docker compose stop worker`, saída 0) e por teste de integração via `app.close()` |
+| Banco de testes ausente                 | o `wagering_test` só é criado na primeira inicialização do volume; se o volume já existia, rode `docker compose exec postgres createdb -U wagering wagering_test`                                 |
+
+## Documentação relacionada
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md): modelo de domínio, concorrência, idempotência, schema,
+  inbox e outbox, SQS, eventos, observabilidade, autenticação e trade-offs.
+- [`docs/CHALLENGE.md`](docs/CHALLENGE.md): enunciado original do desafio.
