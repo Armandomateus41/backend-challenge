@@ -17,6 +17,7 @@
     "test:unit": "bun test test/unit",
     "test:integration": "bun test --timeout 60000 test/integration",
     "test:concurrency": "bun test --timeout 120000 test/concurrency",
+    "test:load": "bun scripts/load-test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
     "format": "prettier --write .",
