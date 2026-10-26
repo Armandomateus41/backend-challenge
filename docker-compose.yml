@@ -1,0 +1,85 @@
+name: wagering
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering
+  AWS_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://localstack:4566
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  LOG_LEVEL: info
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering
+      POSTGRES_DB: wagering
+    ports:
+      - '${POSTGRES_HOST_PORT:-55432}:5432'
+    volumes:
+      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/01-test-database.sql:ro
+      - postgres-data:/var/lib/postgresql/data
+    command: ['postgres', '-c', 'max_connections=300']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U wagering -d wagering']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  localstack:
+    image: localstack/localstack:4.4
+    environment:
+      SERVICES: sqs
+      SQS_ENDPOINT_STRATEGY: path
+    ports:
+      - '${LOCALSTACK_HOST_PORT:-4566}:4566'
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'curl -sf http://localhost:4566/_localstack/health | grep -q "\"sqs\": \"\(available\|running\)\""',
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  setup:
+    build: .
+    environment: *app-env
+    command: ['sh', '-c', 'bun scripts/migrate.ts up && bun scripts/setup-queues.ts']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment:
+      <<: *app-env
+      INSTANCE_ID: api
+      HTTP_PORT: '8080'
+      SQS_CONSUMER_ENABLED: 'false'
+    ports:
+      - '${API_HOST_PORT:-8080}:8080'
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    stop_grace_period: 30s
+
+  worker:
+    build: .
+    environment:
+      <<: *app-env
+      HTTP_PORT: '8080'
+      SQS_CONSUMER_ENABLED: 'true'
+    deploy:
+      replicas: 2
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    stop_grace_period: 30s
+
+volumes:
+  postgres-data:
